@@ -180,6 +180,11 @@ if (sync.blocked.has(host)) skip();
 setInterval(() => sync.refresh(), 3600_000);  // a few hundred bytes per poll
 ```
 
+`refresh()` applies only robots transitions to the list, because that is what the list is made
+of. Edge refusals, new prices and llms.txt changes come back in `other` for you to act on
+separately — an earlier version deleted those domains from the deny list, so a crawler resumed
+fetching exactly what had just started refusing it.
+
 ## Verdicts
 
 The authoritative definition of each verdict — what it means, what it obliges a crawler to do,

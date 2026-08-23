@@ -111,7 +111,16 @@ if (priced) {
   const since = Math.floor(Date.now() / 1000) - 3 * 86400;
   const d = await changesSince("gptbot", since);
   t("the change feed returns a cursor to continue from", typeof d.next_since === "number");
-  t("every change names a direction an operator can act on", (d.changes ?? []).every((c) => ["now_blocks_you", "no_longer_blocks_you"].includes(c.change)));
+  /**
+   * The feed now carries edge and price transitions as well as robots ones, and the sync must
+   * apply only the robots ones to a robots-derived list. Applying the rest deleted domains that
+   * had just started refusing this crawler.
+   */
+  const robotsLabels = ["now_blocks_you", "no_longer_blocks_you"];
+  const applied = (d.changes ?? []).filter((c) => robotsLabels.includes(c.change));
+  const ignored = (d.changes ?? []).filter((c) => !robotsLabels.includes(c.change));
+  t("every change carries a label", (d.changes ?? []).every((c) => typeof c.change === "string" && c.change.length > 3), "a change has no label");
+  t("only robots transitions move the deny list", applied.length + ignored.length === (d.changes ?? []).length, "labels unaccounted for")
   t("the feed reports whether it truncated", typeof d.truncated === "boolean");
 }
 

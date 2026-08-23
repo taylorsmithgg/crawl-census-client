@@ -393,17 +393,26 @@ class BlocklistSync:
     def refresh(self) -> dict:
         delta = changes_since(self.agent, self.cursor, endpoint=self._endpoint, timeout=self._timeout)
         added = removed = 0
+        other: list = []
         for c in delta.get("changes", []):
             d = c.get("domain", "")
-            if c.get("change") == "now_blocks_you":
+            # Only robots transitions move a robots-derived list. Matching "not a block" and
+            # deleting meant a domain that had just started refusing this crawler at the edge
+            # was dropped from the deny list, so the caller resumed fetching what had begun
+            # rejecting it. Other changes are returned instead of silently applied.
+            change = c.get("change")
+            if change == "now_blocks_you":
                 if d not in self.blocked:
                     added += 1
                 self.blocked.add(d)
-            elif d in self.blocked:
-                self.blocked.discard(d)
-                removed += 1
+            elif change == "no_longer_blocks_you":
+                if d in self.blocked:
+                    self.blocked.discard(d)
+                    removed += 1
+            else:
+                other.append(c)
         self.cursor = delta.get("next_cursor") or delta.get("next_since") or self.cursor
-        return {"added": added, "removed": removed, "size": len(self.blocked), "cursor": self.cursor}
+        return {"added": added, "removed": removed, "size": len(self.blocked), "cursor": self.cursor, "other": other}
 
 
 def agent_profile(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 15.0) -> dict:

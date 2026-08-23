@@ -401,16 +401,31 @@ export async function syncBlocklist(agent, options = {}) {
       const delta = await changesSince(agent, cursor, options);
       let added = 0;
       let removed = 0;
+      const other = [];
+      /**
+       * Only robots transitions move a robots-derived list.
+       *
+       * This read `change === "now_blocks_you" ? add : delete`, so every other kind of change
+       * removed the domain. Once the census began reporting edge refusals and new prices, a
+       * domain that had just started refusing this crawler was deleted from the deny list -
+       * the caller would resume fetching precisely what had begun rejecting it. The feed also
+       * publishes `kind`, but matching on the label is what shipped, so both are handled.
+       *
+       * Everything else is returned rather than swallowed: a new price or a new edge refusal
+       * is worth acting on, just not by editing a list of who disallows you.
+       */
       for (const c of delta.changes ?? []) {
         if (c.change === "now_blocks_you") {
           if (!blocked.has(c.domain)) added++;
           blocked.add(c.domain);
-        } else {
+        } else if (c.change === "no_longer_blocks_you") {
           if (blocked.delete(c.domain)) removed++;
+        } else {
+          other.push(c);
         }
       }
       cursor = delta.next_cursor ?? delta.next_since ?? cursor;
-      return { added, removed, size: blocked.size, cursor };
+      return { added, removed, size: blocked.size, cursor, other };
     },
   };
 }
