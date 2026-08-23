@@ -39,6 +39,9 @@ __all__ = [
     "polite_fetch",
     "partition",
     "agent_profile",
+    "blocklist",
+    "changes_since",
+    "BlocklistSync",
     "to_domain",
     "Verdict",
     "FetchResult",
@@ -264,6 +267,62 @@ def partition(urls: Iterable[str], **options: Any) -> Partitioned:
         else:
             out.skip.extend(urls_for)
     return out
+
+
+def blocklist(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> set:
+    """The whole robots.txt blocklist for one agent, as a set of domains.
+
+    One request instead of per-domain lookups. Covers robots.txt only: edge refusal and HTTP 402
+    are per-request behaviours and still need ``preflight``.
+    """
+    req = urllib.request.Request(
+        endpoint + "/agents/" + urllib.parse.quote(agent) + "/blocklist.txt",
+        headers={"user-agent": "crawl-census-client/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        text = resp.read().decode()
+    return {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")}
+
+
+def changes_since(agent: str, since: float, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> dict:
+    """Changes for one agent since a unix timestamp, with the cursor to use next time."""
+    url = endpoint + "/agents/" + urllib.parse.quote(agent) + "/changes.json?since=" + str(int(since))
+    req = urllib.request.Request(url, headers={"user-agent": "crawl-census-client/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+class BlocklistSync:
+    """Keep a deny list current without re-downloading it.
+
+    Construction pulls the full list; ``refresh`` applies only what changed, which is a few
+    hundred bytes rather than a few hundred kilobytes.
+    """
+
+    def __init__(self, agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> None:
+        self.agent = agent
+        self._endpoint = endpoint
+        self._timeout = timeout
+        self.blocked = blocklist(agent, endpoint=endpoint, timeout=timeout)
+        self.cursor = int(time.time())
+
+    def __contains__(self, domain: str) -> bool:
+        return to_domain(domain) in self.blocked
+
+    def refresh(self) -> dict:
+        delta = changes_since(self.agent, self.cursor, endpoint=self._endpoint, timeout=self._timeout)
+        added = removed = 0
+        for c in delta.get("changes", []):
+            d = c.get("domain", "")
+            if c.get("change") == "now_blocks_you":
+                if d not in self.blocked:
+                    added += 1
+                self.blocked.add(d)
+            elif d in self.blocked:
+                self.blocked.discard(d)
+                removed += 1
+        self.cursor = delta.get("next_since", self.cursor)
+        return {"added": added, "removed": removed, "size": len(self.blocked), "cursor": self.cursor}
 
 
 def agent_profile(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 15.0) -> dict:

@@ -175,6 +175,70 @@ export async function partition(urls, options) {
   return out;
 }
 
+/**
+ * Fetch the whole robots.txt blocklist for one agent as a Set of domains.
+ *
+ * This is the cheap path for a fetcher that just wants a deny list in memory: one request,
+ * a few hundred kilobytes, no per-domain lookups at crawl time. It covers robots.txt only.
+ * Edge refusal and HTTP 402 are per-request behaviours and still need `preflight`.
+ */
+export async function blocklist(agent, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
+  const res = await fetch(`${endpoint}/agents/${encodeURIComponent(agent)}/blocklist.txt`, { signal });
+  if (!res.ok) throw new Error(`blocklist for ${agent} returned ${res.status}`);
+  const text = await res.text();
+  const domains = new Set();
+  for (const line of text.split("\n")) {
+    const d = line.trim();
+    if (d && !d.startsWith("#")) domains.add(d);
+  }
+  return domains;
+}
+
+/** Changes for one agent since a unix timestamp. Returns the cursor to pass next time. */
+export async function changesSince(agent, since, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
+  const res = await fetch(`${endpoint}/agents/${encodeURIComponent(agent)}/changes.json?since=${Math.floor(since)}`, { signal });
+  if (!res.ok) throw new Error(`changes for ${agent} returned ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Keep a deny list current without re-downloading it.
+ *
+ * First call pulls the full list. Every later call asks only for what changed and applies the
+ * delta in place, which is a few hundred bytes instead of a few hundred kilobytes. Intended to
+ * be run on a timer inside a long-lived crawler.
+ *
+ *   const sync = await syncBlocklist("gptbot");
+ *   if (sync.blocked.has(host)) skip();
+ *   setInterval(() => sync.refresh(), 3600_000);
+ */
+export async function syncBlocklist(agent, options = {}) {
+  const blocked = await blocklist(agent, options);
+  let cursor = Math.floor(Date.now() / 1000);
+  return {
+    agent,
+    blocked,
+    get cursor() {
+      return cursor;
+    },
+    async refresh() {
+      const delta = await changesSince(agent, cursor, options);
+      let added = 0;
+      let removed = 0;
+      for (const c of delta.changes ?? []) {
+        if (c.change === "now_blocks_you") {
+          if (!blocked.has(c.domain)) added++;
+          blocked.add(c.domain);
+        } else {
+          if (blocked.delete(c.domain)) removed++;
+        }
+      }
+      cursor = delta.next_since ?? cursor;
+      return { added, removed, size: blocked.size, cursor };
+    },
+  };
+}
+
 /** What the census publishes about your own agent, including how to correct it. */
 export async function agentProfile(agent, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
   const res = await fetch(`${endpoint}/mcp`, {

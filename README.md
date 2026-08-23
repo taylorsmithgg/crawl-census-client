@@ -58,6 +58,33 @@ p = partition(urls, agent="gptbot")
 p.crawl, p.skip, p.pay, p.unknown
 ```
 
+## Or just take the file
+
+For a fetcher that only needs a deny list in memory, skip the per-domain calls entirely:
+
+```bash
+curl https://crawlcensus.com/agents/gptbot/blocklist.txt   # one domain per line, commented header
+```
+
+```js
+const sync = await syncBlocklist("gptbot");   // full list once
+if (sync.blocked.has(host)) skip();
+setInterval(() => sync.refresh(), 3600_000);  // then deltas only, a few hundred bytes
+```
+
+```python
+sync = BlocklistSync("gptbot")
+if host in sync: skip()
+sync.refresh()          # {'added': 3, 'removed': 1, 'size': 3310, 'cursor': ...}
+```
+
+The delta feed is `https://crawlcensus.com/agents/<agent>/changes.json?since=<unix>` and each
+response carries `next_since`, so a long-running crawler stays current on a few hundred bytes
+an hour instead of re-downloading the list.
+
+That file covers **robots.txt only**. Edge refusal and HTTP 402 are per-request behaviours and
+still need `preflight` or `politeFetch`.
+
 ## Verdicts
 
 | Verdict | Meaning | Default behaviour |

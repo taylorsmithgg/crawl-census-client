@@ -7,7 +7,7 @@
  *
  * Run: node test.mjs
  */
-import { agentProfile, partition, politeFetch, preflight, toDomain, createCache } from "./index.mjs";
+import { agentProfile, blocklist, changesSince, createCache, partition, politeFetch, preflight, syncBlocklist, toDomain } from "./index.mjs";
 
 const failures = [];
 const t = (name, cond) => {
@@ -68,6 +68,35 @@ if (priced) {
   const p = await partition(["https://nytimes.com/a", "https://nytimes.com/b", "https://cloudflare.com/c"], { agent: "gptbot" });
   t("urls on one host are grouped", p.skip.length === 2 || p.crawl.length === 2 || p.pay.length === 2);
   t("every url is accounted for", p.crawl.length + p.skip.length + p.pay.length + p.unknown.length === 3);
+}
+
+// --- the deny-list file, which is the cheap path for a fetcher ---
+{
+  const set = await blocklist("gptbot");
+  t("the blocklist parses to a usable set", set.size > 100);
+  t("comment lines are not treated as domains", ![...set].some((d) => d.startsWith("#")));
+  t("a known blocker is present", set.has("nytimes.com"));
+  t("a known allower is absent", !set.has("cloudflare.com"));
+}
+
+// --- deltas, so nobody re-downloads the whole list ---
+{
+  const since = Math.floor(Date.now() / 1000) - 3 * 86400;
+  const d = await changesSince("gptbot", since);
+  t("the change feed returns a cursor to continue from", typeof d.next_since === "number");
+  t("every change names a direction an operator can act on", (d.changes ?? []).every((c) => ["now_blocks_you", "no_longer_blocks_you"].includes(c.change)));
+  t("the feed reports whether it truncated", typeof d.truncated === "boolean");
+}
+
+// --- sync applies deltas in place ---
+{
+  const sync = await syncBlocklist("gptbot");
+  const before = sync.blocked.size;
+  const r = await sync.refresh();
+  t("refresh reports what it changed", typeof r.added === "number" && typeof r.removed === "number");
+  t("refresh keeps the set consistent", r.size === sync.blocked.size);
+  t("refresh advances the cursor", r.cursor >= Math.floor(Date.now() / 1000) - 86400);
+  t("a no-op refresh does not corrupt the list", sync.blocked.size >= before - 5);
 }
 
 // --- the operator-facing view ---
