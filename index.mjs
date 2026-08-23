@@ -305,16 +305,25 @@ export async function partition(urls, options) {
  * this in a loop converges instead of resubmitting the same refusals every pass.
  *
  *   const p = await partition(urls, { agent: "gptbot" });
- *   if (p.unmeasured.length) await submitUnmeasured(p, { agent: "gptbot", key });
+ *   if (p.unmeasured.length) await submitUnmeasured(p, { agent: "gptbot", apiKey });
  *   // next run, those domains answer with a real verdict
  */
-export async function submitUnmeasured(partitioned, { endpoint = DEFAULT_ENDPOINT, key, signal } = {}) {
+export async function submitUnmeasured(partitioned, { endpoint = DEFAULT_ENDPOINT, apiKey, key, signal } = {}) {
+  /**
+   * `apiKey`, matching every other function here.
+   *
+   * This one took `key` while preflight, politeFetch and partition all take `apiKey`, so
+   * passing the same options object to two functions silently authenticated one and not the
+   * other - which presents as a rate limit rather than an auth error, and sends the reader
+   * looking in the wrong place. `key` still works so nobody's code breaks.
+   */
+  const token = apiKey ?? key;
   const domains = partitioned?.unmeasured ?? [];
   if (!domains.length) return { submitted: 0, queued: 0, declined: [], already_fresh: [] };
   const res = await fetch(`${endpoint}/api/v1/scan`, {
     method: "POST",
     signal,
-    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ domains }),
   });
   if (!res.ok) {

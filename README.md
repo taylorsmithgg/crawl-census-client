@@ -128,6 +128,20 @@ batched call, and concurrent lookups for the same host await a single request.
 `batchWaitMs` widens the coalescing window for concurrency that arrives in waves rather than
 all at once; the default of zero flushes on the next tick.
 
+## Paying, when an origin quotes a price
+
+A `pay` verdict carries the amount when the origin named one:
+
+```js
+const r = await politeFetch(url, { agent: "claudebot" });
+if (r.verdict === "pay") console.log(r.price);   // "USD 0.5", or null if none was quoted
+```
+
+Two things worth knowing. Most origins answering HTTP 402 name no amount at all, so `price`
+is usually null and the arrangement has to be made out of band. And pricing is per crawler:
+across the measured corpus, 78 of 213 charging origins charge some agents and serve others
+free, so ask with your own token rather than assuming a domain on the list will charge you.
+
 ## Two kinds of unknown
 
 `partition` splits a work queue into `crawl`, `pay`, `skip`, `unknown` and `undecidable`.
