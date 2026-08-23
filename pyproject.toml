@@ -1,0 +1,19 @@
+[project]
+name = "crawl-census-client"
+version = "1.0.0"
+description = "Ask before you fetch. Skip domains that will refuse your crawler, and never route around an HTTP 402 paywall."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["crawler", "robots.txt", "gptbot", "claudebot", "ai-crawler", "preflight", "402"]
+
+[project.urls]
+Homepage = "https://crawlcensus.com/for-crawlers"
+Source = "https://github.com/taylorsmithgg/crawl-census-client"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["crawl_census"]
