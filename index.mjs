@@ -64,7 +64,7 @@ class Cache {
  * failure is never fatal: an unreachable census returns `unknown` for everything, so a crawl
  * degrades to its normal behaviour rather than stopping.
  */
-export async function preflightV2(domains, { agent, apiKey, endpoint = DEFAULT_ENDPOINT, chunk, signal } = {}) {
+export async function preflight(domains, { agent, apiKey, endpoint = DEFAULT_ENDPOINT, chunk, signal } = {}) {
   if (!agent) throw new TypeError("preflight requires { agent }, e.g. 'gptbot'");
   const list = [...new Set((Array.isArray(domains) ? domains : [domains]).map(toDomain).filter(Boolean))];
   if (!list.length) return [];
