@@ -162,6 +162,30 @@ if (p.unmeasured.length) await submitUnmeasured(p, { agent: "gptbot" });
 Submission is a separate call on purpose. A library that quietly POSTs during what reads as a
 lookup is a bad citizen, and you should choose when your queue positions are spent.
 
+## Skipping everything that will not serve you
+
+A deny list is the smaller half. Measured against the live census, a crawler that skips only
+robots disallows still spends around 2,900 requests a pass on domains that permit it in
+robots.txt and refuse it at the edge, or that answer HTTP 402 — for PerplexityBot that set is
+larger than its deny list. Those fetches return nothing and cost a round trip each.
+
+```js
+const skip = await syncSkipList("gptbot");
+if (skip.has(host)) continue;        // disallowed, refused at the edge, or priced
+skip.why(host);                      // "disallow" | "pay" | "refuse" | null
+setInterval(() => skip.refresh(), 3600_000);
+```
+
+| agent | deny list | also skippable | total |
+|---|---|---|---|
+| GPTBot | 3,542 | 2,944 | 6,486 |
+| ClaudeBot | 3,169 | 3,194 | 6,363 |
+| PerplexityBot | 1,128 | 3,658 | 4,786 |
+
+The three sets are kept apart internally, so a change moves the one it belongs to. `why()`
+follows the same precedence as preflight: a disallow outranks a price, because a price is not
+permission.
+
 ## Keeping a deny list current
 
 `syncBlocklist` / `BlocklistSync` download the list once, then apply only what changed.

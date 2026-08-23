@@ -430,6 +430,114 @@ export async function syncBlocklist(agent, options = {}) {
   };
 }
 
+
+/**
+ * Every reason not to fetch, in one membership test, kept current by the delta feed.
+ *
+ * `syncBlocklist` covers robots disallows only, which is the smaller half of the problem.
+ * Measured against the live census: a crawler skipping only the deny list still spends about
+ * 2,900 requests per pass on domains that permit it in robots and refuse it at the edge, or
+ * that answer 402 - and for PerplexityBot that set is larger than the deny list itself. Those
+ * fetches return nothing and cost a round trip each.
+ *
+ * The three lists are kept apart internally so a change applies to the one it belongs to. That
+ * matters: the previous sync deleted a domain from the deny list when it started refusing at
+ * the edge, because it matched "not a block" and removed. Here an edge transition moves the
+ * edge set and leaves robots alone.
+ *
+ *   const skip = await syncSkipList("gptbot");
+ *   if (skip.has(host)) continue;          // disallowed, refused, or priced
+ *   skip.why(host);                        // "disallow" | "refuse" | "pay" | null
+ *   setInterval(() => skip.refresh(), 3600_000);
+ */
+export async function syncSkipList(agent, { endpoint = DEFAULT_ENDPOINT, apiKey, signal } = {}) {
+  const fetchList = async (name) => {
+    const res = await fetch(`${endpoint}/agents/${encodeURIComponent(agent)}/${name}`, {
+      signal,
+      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+    });
+    if (!res.ok) throw new Error(`${name} for ${agent} returned ${res.status}`);
+    const text = await res.text();
+    const set = new Set();
+    for (const line of text.split("\n")) {
+      const d = line.trim().split(" ")[0];
+      if (d && !d.startsWith("#")) set.add(d);
+    }
+    return { set, cursor: res.headers.get("x-cursor") };
+  };
+
+  const [blocked, refused, charged] = await Promise.all([fetchList("blocklist.txt"), fetchList("refused.txt"), fetchList("charging.txt")]);
+  // The blocklist carries the feed position it was built at; the other two are generated from
+  // the same event log, so resuming from it covers all three without a fourth request.
+  let cursor = blocked.cursor ?? Math.floor(Date.now() / 1000);
+
+  const sets = { disallow: blocked.set, refuse: refused.set, pay: charged.set };
+
+  return {
+    agent,
+    sets,
+    get cursor() {
+      return cursor;
+    },
+    get size() {
+      return new Set([...sets.disallow, ...sets.refuse, ...sets.pay]).size;
+    },
+    /** True when this crawler should not spend a request on the host. */
+    has(input) {
+      const d = toDomain(input) || input;
+      return sets.disallow.has(d) || sets.refuse.has(d) || sets.pay.has(d);
+    },
+    /**
+     * Why, in the same precedence preflight uses: a disallow outranks a price, because a price
+     * is not permission, and an edge refusal is reported only when robots permits the fetch.
+     */
+    why(input) {
+      const d = toDomain(input) || input;
+      if (sets.disallow.has(d)) return "disallow";
+      if (sets.pay.has(d)) return "pay";
+      if (sets.refuse.has(d)) return "refuse";
+      return null;
+    },
+    async refresh() {
+      const delta = await changesSince(agent, cursor, { endpoint, signal });
+      const moves = { disallow: 0, refuse: 0, pay: 0, ignored: 0 };
+      for (const c of delta.changes ?? []) {
+        switch (c.change) {
+          case "now_blocks_you":
+            sets.disallow.add(c.domain);
+            moves.disallow++;
+            break;
+          case "no_longer_blocks_you":
+            sets.disallow.delete(c.domain);
+            moves.disallow++;
+            break;
+          case "now_refuses_you_at_the_edge":
+            sets.refuse.add(c.domain);
+            moves.refuse++;
+            break;
+          case "no_longer_refuses_you_at_the_edge":
+            sets.refuse.delete(c.domain);
+            moves.refuse++;
+            break;
+          case "now_charges_you":
+            sets.pay.add(c.domain);
+            moves.pay++;
+            break;
+          case "no_longer_charges_you":
+            sets.pay.delete(c.domain);
+            moves.pay++;
+            break;
+          default:
+            // An llms.txt appearing or a score moving does not change whether to fetch.
+            moves.ignored++;
+        }
+      }
+      cursor = delta.next_cursor ?? delta.next_since ?? cursor;
+      return { ...moves, size: this.size, cursor };
+    },
+  };
+}
+
 /** What the census publishes about your own agent, including how to correct it. */
 export async function agentProfile(agent, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
   const res = await fetch(`${endpoint}/mcp`, {

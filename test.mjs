@@ -7,7 +7,7 @@
  *
  * Run: node test.mjs
  */
-import { agentProfile, blocklist, changesSince, createCache, partition, politeFetch, preflight, syncBlocklist, toDomain, submitUnmeasured } from "./index.mjs";
+import { agentProfile, blocklist, changesSince, createCache, partition, politeFetch, preflight, syncBlocklist, toDomain, submitUnmeasured, syncSkipList } from "./index.mjs";
 
 /**
  * Stop before asserting anything if the census is refusing this run.
@@ -292,6 +292,66 @@ if (priced) {
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+
+/**
+ * One skip list covering every reason not to fetch.
+ *
+ * A crawler skipping only the deny list still spends about 2,900 requests a pass on domains
+ * that permit it in robots and refuse it at the edge, or that answer 402 - and for
+ * PerplexityBot that set is larger than the deny list. The three sets are kept apart so a
+ * transition moves the one it belongs to: conflating them is how an earlier version deleted a
+ * domain from the deny list the moment it started refusing at the edge.
+ */
+{
+  const skip = await syncSkipList("gptbot", withKey({}));
+
+  t("the skip list loads all three sets", skip.sets.disallow.size > 100 && skip.sets.refuse.size > 100 && skip.sets.pay.size > 0, `${skip.sets.disallow.size}/${skip.sets.refuse.size}/${skip.sets.pay.size}`);
+  t("the union is larger than the deny list alone", skip.size > skip.sets.disallow.size, `${skip.size} against ${skip.sets.disallow.size}`);
+  t("the skip list starts from a server cursor", /^\d+\.\d+$/.test(String(skip.cursor)), String(skip.cursor));
+
+  // Classification must agree with preflight, which is the authority and answers per agent.
+  const probes = ["nytimes.com", "cloudflare.com", "wikipedia.org"];
+  const pf = await preflight(probes, withKey({ agent: "gptbot" }));
+  for (const row of pf) {
+    const why = skip.why(row.domain);
+    if (row.verdict === "allow") t(`${row.domain} is not skipped when preflight allows it`, why === null, `skip says ${why}`);
+    else t(`${row.domain} is skipped for the reason preflight gives`, why === row.verdict, `skip says ${why}, preflight says ${row.verdict}`);
+  }
+
+  /**
+   * The property that broke before: a transition must move only its own set. Applied against a
+   * controlled batch rather than waiting for the corpus to produce one.
+   */
+  const beforeDisallow = skip.sets.disallow.size;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, o) => {
+    if (String(u?.url ?? u).includes("/changes.json")) {
+      return new Response(
+        JSON.stringify({
+          count: 3,
+          next_cursor: "9.9",
+          changes: [
+            { domain: "edge-only.example", change: "now_refuses_you_at_the_edge", kind: "edge-refuse" },
+            { domain: "price-only.example", change: "now_charges_you", kind: "charge-start" },
+            { domain: "noise.example", change: "published_an_llms_txt", kind: "llms-added" },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }
+    return realFetch(u, o);
+  };
+  const moved = await skip.refresh();
+  globalThis.fetch = realFetch;
+
+  t("an edge refusal moves the edge set", skip.sets.refuse.has("edge-only.example"), "not added to refuse");
+  t("a new price moves the price set", skip.sets.pay.has("price-only.example"), "not added to pay");
+  t("neither touches the deny list", skip.sets.disallow.size === beforeDisallow, `${beforeDisallow} became ${skip.sets.disallow.size}`);
+  t("an llms.txt change moves nothing", moved.ignored === 1, `ignored ${moved.ignored}`);
+  t("both new domains are now skipped", skip.has("edge-only.example") && skip.has("price-only.example"), "membership not updated");
+  t("the reasons are distinct", skip.why("edge-only.example") === "refuse" && skip.why("price-only.example") === "pay", `${skip.why("edge-only.example")} / ${skip.why("price-only.example")}`);
 }
 
 if (failures.length) {

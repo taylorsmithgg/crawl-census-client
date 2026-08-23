@@ -304,6 +304,93 @@ def partition(urls: Iterable[str], **options: Any) -> Partitioned:
     return out
 
 
+
+class SkipList:
+    """Every reason not to fetch, in one membership test, kept current by the delta feed.
+
+    ``BlocklistSync`` covers robots disallows only, which is the smaller half. Measured against
+    the live census, a crawler skipping only the deny list still spends roughly 2,900 requests a
+    pass on domains that permit it in robots and refuse it at the edge, or that answer HTTP 402 -
+    and for PerplexityBot that set is larger than the deny list itself.
+
+    The three sets are kept apart so a change applies to the one it belongs to. An edge refusal
+    moves the edge set and leaves the robots set alone; conflating them is how an earlier version
+    deleted domains from the deny list when they started refusing.
+    """
+
+    def __init__(self, agent: str, *, endpoint: str = DEFAULT_ENDPOINT, api_key: Optional[str] = None, timeout: float = 30.0) -> None:
+        self.agent = agent
+        self._endpoint = endpoint
+        self._api_key = api_key
+        self._timeout = timeout
+        self.disallow, cursor = self._fetch("blocklist.txt")
+        self.refuse, _ = self._fetch("refused.txt")
+        self.pay, _ = self._fetch("charging.txt")
+        self.cursor = cursor or int(time.time())
+
+    def _fetch(self, name: str):
+        url = self._endpoint + "/agents/" + urllib.parse.quote(self.agent) + "/" + name
+        headers = {"user-agent": "crawl-census-client/1.0"}
+        if self._api_key:
+            headers["authorization"] = "Bearer " + self._api_key
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            text = resp.read().decode()
+            cursor = resp.headers.get("x-cursor")
+        out = set()
+        for line in text.splitlines():
+            d = line.strip().split(" ")[0]
+            if d and not d.startswith("#"):
+                out.add(d)
+        return out, cursor
+
+    def __contains__(self, value: str) -> bool:
+        d = to_domain(value) or value
+        return d in self.disallow or d in self.refuse or d in self.pay
+
+    def __len__(self) -> int:
+        return len(self.disallow | self.refuse | self.pay)
+
+    def why(self, value: str) -> Optional[str]:
+        """Reason, in the precedence preflight uses: a price never overrules a disallow."""
+        d = to_domain(value) or value
+        if d in self.disallow:
+            return "disallow"
+        if d in self.pay:
+            return "pay"
+        if d in self.refuse:
+            return "refuse"
+        return None
+
+    def refresh(self) -> dict:
+        delta = changes_since(self.agent, self.cursor, endpoint=self._endpoint, timeout=self._timeout)
+        moves = {"disallow": 0, "refuse": 0, "pay": 0, "ignored": 0}
+        applies = {
+            "now_blocks_you": (self.disallow, True, "disallow"),
+            "no_longer_blocks_you": (self.disallow, False, "disallow"),
+            "now_refuses_you_at_the_edge": (self.refuse, True, "refuse"),
+            "no_longer_refuses_you_at_the_edge": (self.refuse, False, "refuse"),
+            "now_charges_you": (self.pay, True, "pay"),
+            "no_longer_charges_you": (self.pay, False, "pay"),
+        }
+        for c in delta.get("changes", []):
+            rule = applies.get(c.get("change"))
+            if not rule:
+                # An llms.txt appearing or a score moving does not change whether to fetch.
+                moves["ignored"] += 1
+                continue
+            target, add, name = rule
+            if add:
+                target.add(c["domain"])
+            else:
+                target.discard(c["domain"])
+            moves[name] += 1
+        self.cursor = delta.get("next_cursor") or delta.get("next_since") or self.cursor
+        moves["size"] = len(self)
+        moves["cursor"] = self.cursor
+        return moves
+
+
 def submit_unmeasured(
     partitioned: Partitioned,
     *,
