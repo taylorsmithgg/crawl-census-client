@@ -15,6 +15,28 @@ by [Crawl Census](https://crawlcensus.com):
 
 No dependencies. No key required.
 
+## MCP server
+
+The same measurement is exposed as a remote MCP server, so an agent can ask before it fetches
+rather than after it fails. Listed in the
+[official MCP registry](https://registry.modelcontextprotocol.io) as
+`io.github.taylorsmithgg/crawl-census`.
+
+```json
+{ "mcpServers": { "crawl-census": { "url": "https://crawlcensus.com/mcp" } } }
+```
+
+| Tool | Answers |
+|---|---|
+| `crawl_preflight` | will these domains serve my agent, refuse it, or charge it? |
+| `agent_profile` | what does this census publish about my crawler, and how do I correct it? |
+| `census_facts` | the headline findings as dated records with denominators and citation lines |
+| `site_report` | the stored audit for one domain |
+| `scan_site` | measure a domain now |
+| `census_stats` | corpus-level totals |
+
+No authentication for read tools. Streamable HTTP.
+
 ## Install
 
 ```bash

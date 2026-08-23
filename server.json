@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.taylorsmithgg/crawl-census",
+  "description": "Ask before you fetch: will this domain serve your crawler, refuse it, or charge it?",
+  "title": "Crawl Census",
+  "repository": {
+    "url": "https://github.com/taylorsmithgg/crawl-census-client",
+    "source": "github"
+  },
+  "websiteUrl": "https://crawlcensus.com/for-crawlers",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://crawlcensus.com/mcp"
+    }
+  ]
+}
