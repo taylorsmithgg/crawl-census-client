@@ -23,6 +23,7 @@ Standard library only, Python 3.9+.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -269,11 +270,13 @@ def partition(urls: Iterable[str], **options: Any) -> Partitioned:
     return out
 
 
-def blocklist(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> set:
-    """The whole robots.txt blocklist for one agent, as a set of domains.
+def blocklist_with_cursor(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> tuple:
+    """The blocklist for one agent, plus the feed position it was built at.
 
-    One request instead of per-domain lookups. Covers robots.txt only: edge refusal and HTTP 402
-    are per-request behaviours and still need ``preflight``.
+    Returns ``(domains, cursor)``. The cursor matters: it is the point in the change feed that
+    this exact list corresponds to, so a later poll resumes with no gap and no replay. Deriving
+    a start position locally instead is wrong twice over, being both clock-skewed against the
+    server and blind to anything written while the list was in flight.
     """
     req = urllib.request.Request(
         endpoint + "/agents/" + urllib.parse.quote(agent) + "/blocklist.txt",
@@ -281,12 +284,36 @@ def blocklist(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         text = resp.read().decode()
-    return {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")}
+        cursor = resp.headers.get("x-cursor")
+    domains = {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")}
+    return domains, cursor
 
 
-def changes_since(agent: str, since: float, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> dict:
-    """Changes for one agent since a unix timestamp, with the cursor to use next time."""
-    url = endpoint + "/agents/" + urllib.parse.quote(agent) + "/changes.json?since=" + str(int(since))
+def blocklist(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> set:
+    """The whole robots.txt blocklist for one agent, as a set of domains.
+
+    One request instead of per-domain lookups. Covers robots.txt only: edge refusal and HTTP 402
+    are per-request behaviours and still need ``preflight``. Use ``blocklist_with_cursor`` when
+    the list will be kept current by polling.
+    """
+    return blocklist_with_cursor(agent, endpoint=endpoint, timeout=timeout)[0]
+
+
+def changes_since(agent: str, frm, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> dict:
+    """Changes for one agent, from a cursor or a unix timestamp.
+
+    Prefer a cursor. A timestamp names only a second, and a crawl batch writes dozens of events
+    into a single second, so resuming by second can drop the remainder of it.
+    """
+    token = str(frm)
+    if re.fullmatch(r"\d+\.\d+", token):
+        query = "cursor=" + urllib.parse.quote(token)
+    else:
+        try:
+            query = "since=" + str(int(float(token)))
+        except ValueError:
+            query = "since=0"
+    url = endpoint + "/agents/" + urllib.parse.quote(agent) + "/changes.json?" + query
     req = urllib.request.Request(url, headers={"user-agent": "crawl-census-client/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
@@ -303,8 +330,9 @@ class BlocklistSync:
         self.agent = agent
         self._endpoint = endpoint
         self._timeout = timeout
-        self.blocked = blocklist(agent, endpoint=endpoint, timeout=timeout)
-        self.cursor = int(time.time())
+        self.blocked, cursor = blocklist_with_cursor(agent, endpoint=endpoint, timeout=timeout)
+        # Server-supplied position, falling back to local time only if the header is absent.
+        self.cursor = cursor or int(time.time())
 
     def __contains__(self, domain: str) -> bool:
         return to_domain(domain) in self.blocked
@@ -321,7 +349,7 @@ class BlocklistSync:
             elif d in self.blocked:
                 self.blocked.discard(d)
                 removed += 1
-        self.cursor = delta.get("next_since", self.cursor)
+        self.cursor = delta.get("next_cursor") or delta.get("next_since") or self.cursor
         return {"added": added, "removed": removed, "size": len(self.blocked), "cursor": self.cursor}
 
 

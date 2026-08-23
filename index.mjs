@@ -187,16 +187,27 @@ export async function blocklist(agent, { endpoint = DEFAULT_ENDPOINT, signal } =
   if (!res.ok) throw new Error(`blocklist for ${agent} returned ${res.status}`);
   const text = await res.text();
   const domains = new Set();
+  const cursor = res.headers.get("x-cursor") || null;
   for (const line of text.split("\n")) {
     const d = line.trim();
     if (d && !d.startsWith("#")) domains.add(d);
   }
+  // The list is served with the feed position it was built at, in a header and in the
+  // comment block. Carrying it means a refresh resumes exactly where the list ends.
+  domains.cursor = cursor;
   return domains;
 }
 
-/** Changes for one agent since a unix timestamp. Returns the cursor to pass next time. */
-export async function changesSince(agent, since, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
-  const res = await fetch(`${endpoint}/agents/${encodeURIComponent(agent)}/changes.json?since=${Math.floor(since)}`, { signal });
+/**
+ * Changes for one agent.
+ *
+ * `from` is either an opaque cursor from a previous response or the blocklist header, or a
+ * unix timestamp. Prefer the cursor: a timestamp names only a second, and a crawl batch
+ * writes dozens of events into one, so resuming by second can drop the rest of it.
+ */
+export async function changesSince(agent, from, { endpoint = DEFAULT_ENDPOINT, signal } = {}) {
+  const q = /^\d+\.\d+$/.test(String(from)) ? `cursor=${encodeURIComponent(String(from))}` : `since=${Math.floor(Number(from) || 0)}`;
+  const res = await fetch(`${endpoint}/agents/${encodeURIComponent(agent)}/changes.json?${q}`, { signal });
   if (!res.ok) throw new Error(`changes for ${agent} returned ${res.status}`);
   return res.json();
 }
@@ -214,7 +225,14 @@ export async function changesSince(agent, since, { endpoint = DEFAULT_ENDPOINT, 
  */
 export async function syncBlocklist(agent, options = {}) {
   const blocked = await blocklist(agent, options);
-  let cursor = Math.floor(Date.now() / 1000);
+  /**
+   * Start from the position the list was built at, not from this machine's clock.
+   *
+   * Seeding with `Date.now()` was wrong twice: it is skewed against the server, and it
+   * ignores anything written between the list being generated and the first refresh.
+   * Both errors present as a deny list that quietly misses domains.
+   */
+  let cursor = blocked.cursor ?? Math.floor(Date.now() / 1000);
   return {
     agent,
     blocked,
@@ -233,7 +251,7 @@ export async function syncBlocklist(agent, options = {}) {
           if (blocked.delete(c.domain)) removed++;
         }
       }
-      cursor = delta.next_since ?? cursor;
+      cursor = delta.next_cursor ?? delta.next_since ?? cursor;
       return { added, removed, size: blocked.size, cursor };
     },
   };

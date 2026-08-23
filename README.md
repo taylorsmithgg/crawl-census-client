@@ -107,6 +107,24 @@ an hour instead of re-downloading the list.
 That file covers **robots.txt only**. Edge refusal and HTTP 402 are per-request behaviours and
 still need `preflight` or `politeFetch`.
 
+## Keeping a deny list current
+
+`syncBlocklist` / `BlocklistSync` download the list once, then apply only what changed.
+
+The list is served with the exact position in the change feed it was built at, in an
+`x-cursor` header and a `# cursor:` comment. The clients read it and resume from there, so
+there is no gap between the snapshot and the first poll, and no reliance on your clock being
+in step with the server's. Polling by second cannot express a position inside a second, and a
+crawl batch writes dozens of events into one, so a second-granularity resume can drop the
+remainder of it: measured live, resuming after the first of three same-second changes
+recovered both siblings by cursor and neither by second.
+
+```js
+const sync = await syncBlocklist("gptbot");   // cursor comes from the list itself
+if (sync.blocked.has(host)) skip();
+setInterval(() => sync.refresh(), 3600_000);  // a few hundred bytes per poll
+```
+
 ## Verdicts
 
 | Verdict | Meaning | Default behaviour |
