@@ -163,16 +163,58 @@ export async function partition(urls, options) {
     byDomain.get(d).push(u);
   }
   const verdicts = await preflight([...byDomain.keys()], options);
-  const out = { crawl: [], skip: [], pay: [], unknown: [], verdicts: new Map() };
+  const out = { crawl: [], skip: [], pay: [], unknown: [], undecidable: [], verdicts: new Map(), unmeasured: [] };
   for (const v of verdicts) {
     out.verdicts.set(v.domain, v);
     const urlsFor = byDomain.get(v.domain) ?? [];
     if (v.verdict === "allow") out.crawl.push(...urlsFor);
     else if (v.verdict === "pay") out.pay.push(...urlsFor);
-    else if (v.verdict === "unknown") out.unknown.push(...urlsFor);
-    else out.skip.push(...urlsFor);
+    else if (v.verdict === "unknown") {
+      /**
+       * Two unknowns with opposite correct actions, previously one bucket.
+       *
+       * A domain the census has not measured yet becomes answerable the moment it is
+       * submitted. A domain whose robots.txt disallows CrawlCensusBot never will: asking
+       * again is guaranteed waste, and a loop that retries its unknowns each run would
+       * retry those forever. `measurable` is the server's machine-readable answer to
+       * which is which - do not match on the reason text, which is prose and will change.
+       */
+      if (v.measurable === false) out.undecidable.push(...urlsFor);
+      else {
+        out.unknown.push(...urlsFor);
+        out.unmeasured.push(v.domain);
+      }
+    } else out.skip.push(...urlsFor);
   }
   return out;
+}
+
+/**
+ * Hand the unmeasured domains from a partition back to the census.
+ *
+ * Explicit rather than automatic: a library that quietly POSTs during what reads as a lookup
+ * is a bad citizen, and an operator should choose when their queue positions are spent. The
+ * domains that can never be measured are excluded here as well as server-side, so calling
+ * this in a loop converges instead of resubmitting the same refusals every pass.
+ *
+ *   const p = await partition(urls, { agent: "gptbot" });
+ *   if (p.unmeasured.length) await submitUnmeasured(p, { agent: "gptbot", key });
+ *   // next run, those domains answer with a real verdict
+ */
+export async function submitUnmeasured(partitioned, { endpoint = DEFAULT_ENDPOINT, key, signal } = {}) {
+  const domains = partitioned?.unmeasured ?? [];
+  if (!domains.length) return { submitted: 0, queued: 0, declined: [], already_fresh: [] };
+  const res = await fetch(`${endpoint}/api/v1/scan`, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({ domains }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(`submit returned ${res.status}${detail.error ? `: ${detail.error}` : ""}`);
+  }
+  return res.json();
 }
 
 /**

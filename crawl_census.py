@@ -61,10 +61,19 @@ class Verdict:
     charges: bool = False
     measured_at: Optional[str] = None
     report: str = ""
+    #: Whether asking again could ever change this answer. False only for a site whose
+    #: robots.txt disallows CrawlCensusBot, which this census will therefore never measure.
+    #: Read the flag, never the reason text: the prose is written for humans and will change.
+    measurable: bool = True
 
     @property
     def crawlable(self) -> bool:
         return self.verdict in ("allow", "unknown")
+
+    @property
+    def worth_submitting(self) -> bool:
+        """Unmeasured, and submitting it can actually produce an answer."""
+        return self.verdict == "unknown" and self.measurable
 
 
 @dataclass
@@ -86,6 +95,12 @@ class Partitioned:
     skip: list = field(default_factory=list)
     pay: list = field(default_factory=list)
     unknown: list = field(default_factory=list)
+    #: URLs the census can never answer for, because the site disallows CrawlCensusBot.
+    #: Separate from ``unknown`` because retrying these is guaranteed waste, and a crawler
+    #: that resubmits its unknowns every pass would resubmit these forever.
+    undecidable: list = field(default_factory=list)
+    #: Domains behind ``unknown`` that are worth handing back with ``submit_unmeasured``.
+    unmeasured: list = field(default_factory=list)
     verdicts: dict = field(default_factory=dict)
 
 
@@ -156,6 +171,7 @@ def preflight(
                         charges=bool(r.get("charges")),
                         measured_at=r.get("measured_at"),
                         report=r.get("report", ""),
+                        measurable=r.get("measurable", True),
                     )
                 )
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
@@ -264,10 +280,33 @@ def partition(urls: Iterable[str], **options: Any) -> Partitioned:
         elif v.verdict == "pay":
             out.pay.extend(urls_for)
         elif v.verdict == "unknown":
-            out.unknown.extend(urls_for)
+            if v.measurable:
+                out.unknown.extend(urls_for)
+                out.unmeasured.append(v.domain)
+            else:
+                out.undecidable.extend(urls_for)
         else:
             out.skip.extend(urls_for)
     return out
+
+
+def submit_unmeasured(
+    partitioned: Partitioned,
+    *,
+    endpoint: str = DEFAULT_ENDPOINT,
+    api_key: Optional[str] = None,
+    timeout: float = 30.0,
+) -> dict:
+    """Hand the unmeasured domains from a partition back to the census.
+
+    Explicit rather than automatic: a library that quietly POSTs during what reads as a lookup
+    is a bad citizen. Domains the census can never measure are excluded here and server-side,
+    so calling this each pass converges instead of resubmitting the same refusals forever.
+    """
+    domains = list(partitioned.unmeasured)
+    if not domains:
+        return {"submitted": 0, "queued": 0, "declined": [], "already_fresh": []}
+    return _post(endpoint + "/api/v1/scan", {"domains": domains}, api_key, timeout)
 
 
 def blocklist_with_cursor(agent: str, *, endpoint: str = DEFAULT_ENDPOINT, timeout: float = 30.0) -> tuple:

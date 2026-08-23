@@ -107,6 +107,26 @@ an hour instead of re-downloading the list.
 That file covers **robots.txt only**. Edge refusal and HTTP 402 are per-request behaviours and
 still need `preflight` or `politeFetch`.
 
+## Two kinds of unknown
+
+`partition` splits a work queue into `crawl`, `pay`, `skip`, `unknown` and `undecidable`.
+
+The last two look alike and are not. `unknown` means the census has not measured that domain
+yet: submit it and the next pass gets a real verdict. `undecidable` means the site's robots.txt
+disallows CrawlCensusBot, so this census will never measure it — retrying is guaranteed waste,
+and a loop that resubmits its unknowns each pass would resubmit those forever. The server marks
+the difference with a `measurable` boolean; read that, never the `reason` prose.
+
+```js
+const p = await partition(urls, { agent: "gptbot" });
+await Promise.all(p.crawl.map(politeFetchOne));
+if (p.unmeasured.length) await submitUnmeasured(p, { agent: "gptbot" });
+// p.undecidable: read their robots.txt yourself. Asking us again cannot help.
+```
+
+Submission is a separate call on purpose. A library that quietly POSTs during what reads as a
+lookup is a bad citizen, and you should choose when your queue positions are spent.
+
 ## Keeping a deny list current
 
 `syncBlocklist` / `BlocklistSync` download the list once, then apply only what changed.

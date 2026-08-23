@@ -7,7 +7,7 @@
  *
  * Run: node test.mjs
  */
-import { agentProfile, blocklist, changesSince, createCache, partition, politeFetch, preflight, syncBlocklist, toDomain } from "./index.mjs";
+import { agentProfile, blocklist, changesSince, createCache, partition, politeFetch, preflight, syncBlocklist, toDomain, submitUnmeasured } from "./index.mjs";
 
 const failures = [];
 const t = (name, cond) => {
@@ -115,6 +115,41 @@ if (priced) {
     threw = true;
   }
   t("omitting the agent is an error", threw);
+}
+
+
+/**
+ * The two unknowns.
+ *
+ * `partition` reported one `unknown` bucket for two situations with opposite correct actions:
+ * a domain the census has not measured yet, which becomes answerable the moment it is
+ * submitted, and a domain whose robots.txt disallows CrawlCensusBot, which never will. A
+ * crawler retrying its unknowns each pass retried the second kind forever, and the only way to
+ * tell them apart was matching English in `reason`.
+ */
+{
+  const stamp = Date.now();
+  const urls = [`https://never-measured-${stamp}.example/x`, "https://lobste.rs/y", "https://cloudflare.com/z"];
+  const p = await partition(urls, { agent: "gptbot" });
+
+  t("a permitted domain is still routed to crawl", p.crawl.length === 1, `crawl ${p.crawl.length}`);
+  t("an unmeasured domain lands in unknown", p.unknown.some((u) => u.includes(`never-measured-${stamp}`)), JSON.stringify(p.unknown));
+  t("a site that refused our crawler is undecidable, not unknown", p.undecidable.some((u) => u.includes("lobste.rs")), JSON.stringify(p.undecidable));
+  t("an undecidable domain is never offered for submission", !p.unmeasured.includes("lobste.rs"), JSON.stringify(p.unmeasured));
+  t("the unmeasured list names the domain worth submitting", p.unmeasured.some((d) => d.includes(`never-measured-${stamp}`)), JSON.stringify(p.unmeasured));
+
+  // The distinction must come from the machine field, not from prose.
+  const v = p.verdicts.get("lobste.rs");
+  t("the server marks it unmeasurable", v?.measurable === false, `measurable ${v?.measurable}`);
+
+  // Submitting converges: nothing undecidable is ever sent.
+  const sub = await submitUnmeasured(p, { agent: "gptbot" });
+  t("submission accepts the measurable ones", typeof sub.queued === "number", JSON.stringify(sub).slice(0, 60));
+  t("submission never carries a refused domain", !(sub.declined || []).includes("lobste.rs"), JSON.stringify(sub.declined));
+
+  // A second pass must not re-offer the refusal, or the loop never terminates.
+  const again = await partition(urls, { agent: "gptbot" });
+  t("a second pass still excludes the refusal", !again.unmeasured.includes("lobste.rs"), JSON.stringify(again.unmeasured));
 }
 
 if (failures.length) {
