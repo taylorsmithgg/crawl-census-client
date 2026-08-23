@@ -104,6 +104,93 @@ export function toDomain(input) {
 }
 
 /**
+ * Resolve one domain's verdict, sharing work with every other lookup in flight.
+ *
+ * Measured against the live census before this existed: twenty hosts fetched concurrently cost
+ * twenty preflight calls carrying one domain each, and the same host requested three times at
+ * once cost three - the cache only helps after the first resolves, which is exactly when a
+ * concurrent crawler has not got there yet. The endpoint accepts up to a thousand domains in
+ * one call, so a crawler was paying per host against an allowance meant to cover a thousand.
+ *
+ * Two mechanisms, both small:
+ *
+ *   - An in-flight map keyed by agent and domain, so concurrent lookups for one host await a
+ *     single request instead of racing to make their own.
+ *   - A queue drained on the next tick, so lookups issued in the same burst leave as one
+ *     batched call. `batchWaitMs` widens the window for a crawler whose concurrency arrives
+ *     in waves rather than all at once; `batchSize` must stay within the caller's plan cap,
+ *     which is 25 domains per call without a key.
+ *
+ * A failed batch rejects only its own members. One bad request must not poison a crawl.
+ */
+const inflight = new Map();
+const pending = new Map();
+let pendingTimer = null;
+
+function batchKey({ agent, endpoint, apiKey }) {
+  return `${agent}\u0000${endpoint}\u0000${apiKey ?? ""}`;
+}
+
+async function flushPending() {
+  pendingTimer = null;
+  const groups = [...pending.entries()];
+  pending.clear();
+  for (const [, group] of groups) {
+    const { options, waiters } = group;
+    const domains = [...waiters.keys()];
+    const size = options.batchSize ?? 25;
+    for (let i = 0; i < domains.length; i += size) {
+      const slice = domains.slice(i, i + size);
+      try {
+        const rows = await preflight(slice, options);
+        const byDomain = new Map(rows.map((r) => [r.domain, r]));
+        for (const d of slice) {
+          for (const resolve of waiters.get(d).resolvers) resolve(byDomain.get(d) ?? null);
+          inflight.delete(`${options.agent}:${d}`);
+        }
+      } catch (err) {
+        for (const d of slice) {
+          for (const reject of waiters.get(d).rejecters) reject(err);
+          inflight.delete(`${options.agent}:${d}`);
+        }
+      }
+    }
+  }
+}
+
+function lookupVerdict(domain, options) {
+  const key = `${options.agent}:${domain}`;
+  const existing = inflight.get(key);
+  if (existing) return existing;
+
+  const promise = new Promise((resolve, reject) => {
+    const gk = batchKey(options);
+    let group = pending.get(gk);
+    if (!group) {
+      group = { options, waiters: new Map() };
+      pending.set(gk, group);
+    }
+    let entry = group.waiters.get(domain);
+    if (!entry) {
+      entry = { resolvers: [], rejecters: [] };
+      group.waiters.set(domain, entry);
+    }
+    entry.resolvers.push(resolve);
+    entry.rejecters.push(reject);
+    if (!pendingTimer) {
+      const wait = options.batchWaitMs ?? 0;
+      // Deliberately not unref'd. The flush is what settles every awaiting lookup, so a timer
+      // the runtime is free to skip means a caller awaiting a single verdict never resolves -
+      // observed immediately as "unsettled top-level await" the first time the suite ran it.
+      // The delay is zero or a few milliseconds, so it cannot meaningfully hold a process open.
+      pendingTimer = setTimeout(flushPending, wait > 0 ? wait : 0);
+    }
+  });
+  inflight.set(key, promise);
+  return promise;
+}
+
+/**
  * A crawler-aware fetch.
  *
  * Consults the census, then either performs the fetch or returns a skip record explaining why
@@ -114,7 +201,7 @@ export function toDomain(input) {
  * `onPay` decides what to do with an origin that quoted a price. The default is to skip, which
  * is the only defensible default: routing around a 402 takes content someone is selling.
  */
-export async function politeFetch(url, { agent, apiKey, endpoint = DEFAULT_ENDPOINT, cache = sharedCache, onPay = "skip", allowUnknown = true, fetchOptions = {}, signal } = {}) {
+export async function politeFetch(url, { agent, apiKey, endpoint = DEFAULT_ENDPOINT, cache = sharedCache, batchSize, batchWaitMs, onPay = "skip", allowUnknown = true, fetchOptions = {}, signal } = {}) {
   if (!agent) throw new TypeError("politeFetch requires { agent }, e.g. 'gptbot'");
   const domain = toDomain(url);
   if (!domain) throw new TypeError(`Not a usable URL: ${String(url).slice(0, 80)}`);
@@ -122,7 +209,7 @@ export async function politeFetch(url, { agent, apiKey, endpoint = DEFAULT_ENDPO
   const key = `${agent}:${domain}`;
   let verdict = cache.get(key);
   if (!verdict) {
-    [verdict] = await preflight([domain], { agent, apiKey, endpoint, signal });
+    verdict = await lookupVerdict(domain, { agent, apiKey, endpoint, signal, batchSize, batchWaitMs });
     if (verdict) cache.set(key, verdict);
   }
   const v = verdict?.verdict ?? "unknown";
@@ -155,6 +242,7 @@ export function createCache(ttlMs, max) {
  * is known up front: one call per 1,000 domains instead of one per host.
  */
 export async function partition(urls, options) {
+  const { cache = sharedCache } = options ?? {};
   const byDomain = new Map();
   for (const u of urls) {
     const d = toDomain(u);
@@ -166,6 +254,16 @@ export async function partition(urls, options) {
   const out = { crawl: [], skip: [], pay: [], unknown: [], undecidable: [], verdicts: new Map(), unmeasured: [] };
   for (const v of verdicts) {
     out.verdicts.set(v.domain, v);
+    /**
+     * Warm the cache politeFetch reads.
+     *
+     * The documented pattern is partition a queue, then fetch what it says to fetch - and it
+     * cost two census calls for one queue, because partition looked every domain up and then
+     * dropped the answers on the floor. Measured at four domains: one call to partition, then
+     * a second for the two it said were crawlable. Writing them through makes the second call
+     * disappear, which for a crawler running this loop continuously is half its census traffic.
+     */
+    if (cache && options?.agent) cache.set(`${options.agent}:${v.domain}`, v);
     const urlsFor = byDomain.get(v.domain) ?? [];
     if (v.verdict === "allow") out.crawl.push(...urlsFor);
     else if (v.verdict === "pay") out.pay.push(...urlsFor);

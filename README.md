@@ -107,6 +107,27 @@ an hour instead of re-downloading the list.
 That file covers **robots.txt only**. Edge refusal and HTTP 402 are per-request behaviours and
 still need `preflight` or `politeFetch`.
 
+## What a crawl costs the census
+
+Measured, not asserted. Twenty hosts fetched concurrently used to cost twenty preflight calls
+carrying one domain each; the same host requested three times at once cost three, because the
+cache only helps after the first lookup resolves. The anonymous allowance is 240 calls an hour,
+so a crawler hit its ceiling at 240 hosts when one call covers twenty-five.
+
+`politeFetch` now shares work automatically: lookups issued in the same tick leave as one
+batched call, and concurrent lookups for the same host await a single request.
+
+| pattern | before | now |
+|---|---|---|
+| 20 hosts, concurrent | 20 calls | 1 call of 20 |
+| 1 host, 3 URLs, concurrent | 3 calls | 1 call |
+| 60 hosts, concurrent | 60 calls | 3 calls (25 / 25 / 10) |
+| `partition` then fetch | 2 calls | 1 call |
+
+`batchSize` defaults to 25, the per-call cap without a key. Raise it with a Pro or Data key.
+`batchWaitMs` widens the coalescing window for concurrency that arrives in waves rather than
+all at once; the default of zero flushes on the next tick.
+
 ## Two kinds of unknown
 
 `partition` splits a work queue into `crawl`, `pay`, `skip`, `unknown` and `undecidable`.

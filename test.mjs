@@ -152,6 +152,106 @@ if (priced) {
   t("a second pass still excludes the refusal", !again.unmeasured.includes("lobste.rs"), JSON.stringify(again.unmeasured));
 }
 
+
+/**
+ * What a concurrent crawl costs the census.
+ *
+ * Measured before this was fixed: twenty hosts fetched at once cost twenty preflight calls
+ * carrying one domain each, and the same host requested three times concurrently cost three,
+ * because the cache only helps after the first lookup resolves. The endpoint accepts up to a
+ * thousand domains per call and the anonymous allowance is 240 an hour, so a crawler was
+ * hitting its ceiling at 240 hosts when one call could have covered twenty-five.
+ *
+ * These assertions count the requests rather than trusting the design, and check that
+ * batching did not scramble which verdict belongs to which domain - a silent failure that
+ * would make a crawler skip the wrong sites.
+ */
+{
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  const sizes = [];
+  globalThis.fetch = async (u, o) => {
+    const str = String(u?.url ?? u);
+    if (str.includes("/api/v1/preflight")) {
+      calls++;
+      try { sizes.push(JSON.parse(o.body).domains.length); } catch { /* not our body shape */ }
+    }
+    return realFetch(u, o);
+  };
+
+  try {
+    const hosts = ["cloudflare.com", "nytimes.com", "apnews.com", "wikipedia.org", "forbes.com", "bbc.co.uk"];
+
+    // Ground truth from a single explicit call, before any coalescing is involved.
+    const truth = new Map((await preflight(hosts, { agent: "gptbot" })).map((r) => [r.domain, r.verdict]));
+
+    calls = 0;
+    sizes.length = 0;
+    const cache = createCache();
+    const got = new Map();
+    await Promise.all(
+      hosts.map(async (h) => {
+        const r = await politeFetch(`https://${h}/probe`, { agent: "gptbot", cache }).catch(() => null);
+        got.set(h, r?.verdict ?? "ERR");
+      }),
+    );
+
+    t("concurrent hosts cost one census call, not one each", calls === 1, `${calls} calls for ${hosts.length} hosts`);
+    t("the single call carries every domain", sizes[0] === hosts.length, `first call carried ${sizes[0]}`);
+    const wrong = hosts.filter((h) => truth.get(h) !== got.get(h));
+    t("batching does not scramble verdicts", wrong.length === 0, wrong.map((h) => `${h}: ${truth.get(h)} vs ${got.get(h)}`).join(", "));
+
+    // One host, several URLs, all in flight at once: the lookups must share a request.
+    calls = 0;
+    const c2 = createCache();
+    await Promise.all([1, 2, 3, 4].map((i) => politeFetch(`https://srf.ch/dup-${i}`, { agent: "gptbot", cache: c2 }).catch(() => {})));
+    t("concurrent URLs on one host share a single lookup", calls === 1, `${calls} calls for one host`);
+
+    // Beyond the anonymous per-call cap the batch must split, not overflow into a 413.
+    calls = 0;
+    sizes.length = 0;
+    const many = Array.from({ length: 60 }, (_, i) => `batch-cap-${i}-${Date.now()}.example`);
+    const c3 = createCache();
+    await Promise.all(many.map((h) => politeFetch(`https://${h}/x`, { agent: "gptbot", cache: c3 }).catch(() => {})));
+    t("a large wave splits into several calls", calls >= 3, `${calls} calls for 60 hosts`);
+    t("no call exceeds the anonymous per-call cap", sizes.every((n) => n <= 25), `sizes ${JSON.stringify(sizes)}`);
+    t("every host in the wave is accounted for", sizes.reduce((a, b) => a + b, 0) === many.length, `${sizes.reduce((a, b) => a + b, 0)} of ${many.length}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+
+/**
+ * The documented two-step must cost one call, not two.
+ *
+ * `partition` looked up every domain and then discarded the answers, so the pattern the README
+ * teaches - partition a queue, then fetch what it says to fetch - paid the census twice for one
+ * queue. For a crawler running that loop continuously it was half its census traffic, spent on
+ * questions it had already asked and been answered.
+ */
+{
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (u, o) => {
+    if (String(u?.url ?? u).includes("/api/v1/preflight")) calls++;
+    return realFetch(u, o);
+  };
+  try {
+    const urls = ["https://cloudflare.com/a", "https://wikipedia.org/b", "https://apnews.com/c", "https://forbes.com/d"];
+    const cache = createCache();
+    const p = await partition(urls, { agent: "gptbot", cache });
+    const afterPartition = calls;
+    const results = await Promise.all(p.crawl.map((u) => politeFetch(u, { agent: "gptbot", cache }).catch(() => null)));
+
+    t("partition costs one call for the whole queue", afterPartition === 1, `${afterPartition} calls`);
+    t("fetching what partition allowed costs nothing further", calls === afterPartition, `${calls - afterPartition} extra calls`);
+    t("the warmed verdicts are still the right ones", results.every((r) => r && r.verdict === "allow"), JSON.stringify(results.map((r) => r?.verdict)));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 if (failures.length) {
   console.log(`FAIL ${failures.length} client assertions`);
   for (const f of failures) console.log("  " + f);

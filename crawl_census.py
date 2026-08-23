@@ -264,7 +264,15 @@ def _get(url: str, agent: str, timeout: float):
 
 
 def partition(urls: Iterable[str], **options: Any) -> Partitioned:
-    """Split a work queue before crawling it: one call per 1,000 domains, not one per host."""
+    """Split a work queue before crawling it: one call per 1,000 domains, not one per host.
+
+    The verdicts are written into the cache ``polite_fetch`` reads, so the documented pattern -
+    partition a queue, then fetch what it says to fetch - costs one census call rather than two.
+    Before this, partition looked every domain up and discarded the answers, and the subsequent
+    fetches paid for them again.
+    """
+    cache = options.pop("cache", None) or shared_cache
+    agent = options.get("agent", "")
     by_domain: dict = {}
     for u in urls:
         d = to_domain(u)
@@ -274,6 +282,8 @@ def partition(urls: Iterable[str], **options: Any) -> Partitioned:
     out = Partitioned()
     for v in preflight(by_domain.keys(), **options):
         out.verdicts[v.domain] = v
+        if agent:
+            cache.set(agent + ":" + v.domain, v)
         urls_for = by_domain.get(v.domain, [])
         if v.verdict == "allow":
             out.crawl.extend(urls_for)
