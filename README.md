@@ -182,6 +182,15 @@ setInterval(() => sync.refresh(), 3600_000);  // a few hundred bytes per poll
 
 ## Verdicts
 
+The authoritative definition of each verdict — what it means, what it obliges a crawler to do,
+and whether asking again could change it — is published as data at
+[`/api/v1/verdicts`](https://crawlcensus.com/api/v1/verdicts). The list below is a summary; if
+the two ever disagree, the endpoint is right and this file is stale.
+
+`politeFetch` skips `disallow`, `refuse` and `pay` by default, which is the endpoint's derived
+`do_not_fetch` set. The copy here is deliberate — a crawl loop should not need a network call to
+decide — and a test compares the two so it cannot drift unnoticed.
+
 | Verdict | Meaning | Default behaviour |
 |---|---|---|
 | `allow` | robots.txt permits this agent, and a live request carrying its user agent was served | fetch |
