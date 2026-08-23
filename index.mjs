@@ -214,13 +214,22 @@ export async function politeFetch(url, { agent, apiKey, endpoint = DEFAULT_ENDPO
   }
   const v = verdict?.verdict ?? "unknown";
 
+  /**
+   * The amount travels with the verdict.
+   *
+   * A `pay` result used to carry only the reason string, so an operator willing to buy had to
+   * parse prose or go back to the census. Four origins in the corpus quote a real amount, and
+   * the decision to pay one cent is not the decision to pay fifty.
+   */
+  const price = verdict?.price ?? null;
+
   if (v === "pay" && onPay === "fetch") {
     // Explicit opt-in only, and recorded on the result so it shows up in logs.
     const response = await fetch(url, { signal, ...fetchOptions });
-    return { skipped: false, verdict: v, reason: verdict?.reason ?? "", paidRouteOverridden: true, response, domain };
+    return { skipped: false, verdict: v, reason: verdict?.reason ?? "", price, paidRouteOverridden: true, response, domain };
   }
   if (BLOCKING.has(v)) {
-    return { skipped: true, verdict: v, reason: verdict?.reason ?? "", response: null, domain, report: verdict?.report ?? "" };
+    return { skipped: true, verdict: v, reason: verdict?.reason ?? "", price, response: null, domain, report: verdict?.report ?? "" };
   }
   if (v === "unknown" && !allowUnknown) {
     return { skipped: true, verdict: v, reason: verdict?.reason ?? "Not measured, and allowUnknown is false.", response: null, domain, report: verdict?.report ?? "" };

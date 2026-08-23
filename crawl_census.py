@@ -65,6 +65,9 @@ class Verdict:
     #: robots.txt disallows CrawlCensusBot, which this census will therefore never measure.
     #: Read the flag, never the reason text: the prose is written for humans and will change.
     measurable: bool = True
+    #: For a ``pay`` verdict, the amount the origin named, when it named one. Distinct from
+    #: ``terms``: most origins that reply at all send only ``retry-after``, which is not a price.
+    price: Optional[str] = None
 
     @property
     def crawlable(self) -> bool:
@@ -172,6 +175,7 @@ def preflight(
                         measured_at=r.get("measured_at"),
                         report=r.get("report", ""),
                         measurable=r.get("measurable", True),
+                        price=r.get("price"),
                     )
                 )
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
